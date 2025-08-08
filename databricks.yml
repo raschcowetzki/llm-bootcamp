@@ -1,0 +1,27 @@
+bundle:
+  name: unity-catalog-modeler
+
+resources:
+  apps:
+    modeler:
+      name: unity-catalog-modeler
+      description: Streamlit Unity Catalog modeler app
+      source_code_path: .
+      app:
+        # Use app.yaml runtime manifest
+        file_path: app.yaml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://<your-workspace-host>
+  prod:
+    mode: production
+    workspace:
+      host: https://<your-workspace-host>
+      root_path: /Workspace/Users/<you>/.bundle/${bundle.name}/${bundle.target}
+    permissions:
+      - user_name: <you@company.com>
+        level: CAN_MANAGE

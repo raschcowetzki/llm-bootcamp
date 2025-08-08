@@ -1,0 +1,14 @@
+command: ["streamlit", "run", "app.py", "--server.port", "8080", "--server.address", "0.0.0.0"]
+env:
+  - name: "STREAMLIT_BROWSER_GATHER_USAGE_STATS"
+    value: "false"
+  # Optionally pass warehouse ID; http_path will be derived as /sql/1.0/warehouses/{id}
+  # - name: "DATABRICKS_WAREHOUSE_ID"
+  #   value: "<warehouse-id>"
+  # Optionally define UC connection overrides; otherwise the app reads Streamlit secrets
+  # - name: "DATABRICKS_HOST"
+  #   value: "adb-xxxxxxxx.azuredatabricks.net"
+  # - name: "DATABRICKS_HTTP_PATH"
+  #   value: "/sql/1.0/warehouses/xxxx"
+  # - name: "DATABRICKS_TOKEN"
+  #   value: "${secrets/my-scope/my-token}"

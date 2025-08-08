@@ -30,6 +30,21 @@ def get_secret_or_env(key: str, default: str = "") -> str:
         return os.getenv(key, default)
 
 
+def derive_defaults_for_apps() -> Dict[str, str]:
+    # Derive sensible defaults for Databricks Apps system envs
+    host = (
+        get_secret_or_env("DATABRICKS_HOST")
+        or os.getenv("DATABRICKS_WORKSPACE_URL", "")
+        or os.getenv("DATABRICKS_WORKSPACE_HOST", "")
+    )
+    http_path = get_secret_or_env("DATABRICKS_HTTP_PATH")
+    wh_id = os.getenv("DATABRICKS_WAREHOUSE_ID", "").strip()
+    if not http_path and wh_id:
+        http_path = f"/sql/1.0/warehouses/{wh_id}"
+    token = get_secret_or_env("DATABRICKS_TOKEN")
+    return {"host": host, "http_path": http_path, "token": token}
+
+
 @st.cache_resource(show_spinner=False)
 def get_client(host: str, http_path: str, token: str) -> DatabricksClient:
     return DatabricksClient(host=host, http_path=http_path, access_token=token)
@@ -37,14 +52,11 @@ def get_client(host: str, http_path: str, token: str) -> DatabricksClient:
 
 # Sidebar: Connection
 st.sidebar.header("Databricks Connection")
-default_host = get_secret_or_env("DATABRICKS_HOST")
-default_http_path = get_secret_or_env("DATABRICKS_HTTP_PATH")
-default_token = get_secret_or_env("DATABRICKS_TOKEN")
-
+defaults = derive_defaults_for_apps()
 with st.sidebar:
-    host = st.text_input("Host", value=default_host, placeholder="adb-xxxxxxxx.azuredatabricks.net")
-    http_path = st.text_input("SQL Warehouse HTTP Path", value=default_http_path, placeholder="/sql/1.0/warehouses/xxxx")
-    token = st.text_input("Access Token", value=default_token, type="password")
+    host = st.text_input("Host", value=defaults["host"], placeholder="adb-xxxxxxxx.azuredatabricks.net")
+    http_path = st.text_input("SQL Warehouse HTTP Path", value=defaults["http_path"], placeholder="/sql/1.0/warehouses/xxxx")
+    token = st.text_input("Access Token", value=defaults["token"], type="password")
     _connect_btn = st.button("Connect / Refresh", use_container_width=True)
 
 if not (host and http_path and token):
@@ -256,8 +268,11 @@ else:
 
     if "design_model" not in st.session_state:
         st.session_state.design_model = {"tables": {}, "relationships": []}
+    if "design_positions" not in st.session_state:
+        st.session_state.design_positions = {}
 
     dm = st.session_state.design_model
+    positions: Dict[str, Dict[str, float]] = st.session_state.design_positions
 
     cols = st.columns([2, 3])
 
@@ -305,6 +320,8 @@ else:
                                 if str(r.get("name", "")).strip()
                             ]
                         }
+                        # Initialize a position if missing
+                        positions.setdefault(table_name.strip(), {"x": 100 + 120 * (len(positions) % 5), "y": 100 + 120 * (len(positions) // 5)})
                         st.success(f"Upserted table `{table_name}` in design model.")
             with c2:
                 if st.button("Clear Form"):
@@ -316,6 +333,7 @@ else:
                 if st.button("Remove Table"):
                     if table_name.strip() in dm["tables"]:
                         del dm["tables"][table_name.strip()]
+                        positions.pop(table_name.strip(), None)
                         dm["relationships"] = [r for r in dm["relationships"] if r.get("child_table") != table_name and r.get("parent_table") != table_name]
                         st.success(f"Removed table `{table_name}` from design model.")
 
@@ -355,11 +373,49 @@ else:
 
     with cols[1]:
         st.markdown("### Canvas / Preview")
-        dot = build_graphviz_dot_from_model(dm, catalog, schema)
+        # Try Cytoscape for drag-and-drop; fallback to Graphviz
+        used_cyto = False
         try:
-            st.graphviz_chart(dot, use_container_width=True)
-        except Exception as exc:  # noqa: BLE001
-            st.warning(f"Graphviz rendering failed: {exc}")
+            from streamlit_cytoscapejs import cytoscape  # type: ignore
+
+            # Build elements
+            elements = []
+            for tname in dm["tables"].keys():
+                pos = positions.get(tname, None)
+                node = {"data": {"id": tname, "label": tname}}
+                if pos:
+                    node["position"] = {"x": float(pos.get("x", 0)), "y": float(pos.get("y", 0))}
+                elements.append(node)
+            for r in dm["relationships"]:
+                elements.append({"data": {"source": r["child_table"], "target": r["parent_table"], "label": r.get("name", "fk")}})
+
+            stylesheet = [
+                {"selector": "node", "style": {"content": "data(label)", "text-valign": "center", "text-halign": "center", "shape": "round-rectangle", "background-color": "#e6f2ff", "border-width": 1, "border-color": "#4b8bbe"}},
+                {"selector": "edge", "style": {"curve-style": "bezier", "target-arrow-shape": "triangle", "line-color": "#4b8bbe", "target-arrow-color": "#4b8bbe", "width": 1}},
+            ]
+
+            cy = cytoscape(
+                elements=elements,
+                layout={"name": "preset"},  # honor provided positions
+                stylesheet=stylesheet,
+                height="700px",
+                user_panning_enabled=True,
+                user_zooming_enabled=True,
+                wheel_sensitivity=0.2,
+                key="design_cyto",
+            )
+            # The component currently returns selection info only; positions are not returned.
+            # Positions persist visually during a session. We keep initial positions in session state.
+            used_cyto = True
+        except Exception:
+            used_cyto = False
+
+        if not used_cyto:
+            dot = build_graphviz_dot_from_model(dm, catalog, schema)
+            try:
+                st.graphviz_chart(dot, use_container_width=True)
+            except Exception as exc:  # noqa: BLE001
+                st.warning(f"Graphviz rendering failed: {exc}")
 
         st.markdown("### Import from Unity Catalog")
         if st.button("Import UC into Design"):
@@ -368,6 +424,8 @@ else:
                 dm_import = metadata_to_model(m)
                 # Merge: UC import wins for existing tables
                 st.session_state.design_model = dm_import
+                # Initialize positions grid
+                st.session_state.design_positions = {t: {"x": 100 + 180 * (i % 4), "y": 100 + 160 * (i // 4)} for i, t in enumerate(dm_import["tables"].keys())}
                 st.success("Imported current UC model into Design mode.")
                 dm = st.session_state.design_model
 
