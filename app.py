@@ -110,44 +110,13 @@ if mode == "Explore":
             st.graphviz_chart(dot, use_container_width=True)
             rendered = True
         except Exception as exc:  # noqa: BLE001
-            st.warning(f"Graphviz rendering failed, falling back to interactive view: {exc}")
+            st.warning(f"Graphviz rendering failed, falling back to simple view: {exc}")
 
         if not rendered:
-            try:
-                from pyvis.network import Network  # Lazy import
-                import tempfile
-                from streamlit.components.v1 import html
-
-                net = Network(height="650px", width="100%", directed=True)
-                net.barnes_hut()
-
-                tables: Dict = metadata.get("tables", {})
-                relationships = metadata.get("relationships", [])
-
-                for tname, t in tables.items():
-                    title_lines = [f"<b>{schema}.{tname}</b>"]
-                    for col in t["columns"]:
-                        flags = []
-                        if col.get("is_pk"): flags.append("PK")
-                        if col.get("is_fk"): flags.append("FK")
-                        flag_txt = f" [{' ,'.join(flags)}]" if flags else ""
-                        title_lines.append(f"{col['name']}: {col.get('data_type','')}{flag_txt}")
-                    net.add_node(tname, label=tname, title="<br/>".join(title_lines), shape="box")
-
-                for child, parent, child_cols, parent_cols, fk in relationships:
-                    label = fk
-                    if len(child_cols) == len(parent_cols) and len(child_cols) > 0:
-                        pairs = ", ".join([f"{c}->{p}" for c, p in zip(child_cols, parent_cols)])
-                        label = f"{fk} ({pairs})"
-                    net.add_edge(child, parent, title=label, label=label, color="#4b8bbe")
-
-                with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as tmp:
-                    net.show(tmp.name)
-                    tmp.flush()
-                    with open(tmp.name, "r", encoding="utf-8") as fh:
-                        html(fh.read(), height=680)
-            except Exception as exc:  # noqa: BLE001
-                st.error(f"Failed to render fallback view: {exc}")
+            # Minimal static fallback list if Graphviz or extras are unavailable
+            tables: Dict = metadata.get("tables", {})
+            st.write("Tables:")
+            st.dataframe(pd.DataFrame({"table": list(tables.keys())}))
 
         with st.expander("Metadata", expanded=False):
             st.json(metadata)
@@ -320,7 +289,6 @@ else:
                                 if str(r.get("name", "")).strip()
                             ]
                         }
-                        # Initialize a position if missing
                         positions.setdefault(table_name.strip(), {"x": 100 + 120 * (len(positions) % 5), "y": 100 + 120 * (len(positions) // 5)})
                         st.success(f"Upserted table `{table_name}` in design model.")
             with c2:
@@ -373,12 +341,11 @@ else:
 
     with cols[1]:
         st.markdown("### Canvas / Preview")
-        # Try Cytoscape for drag-and-drop; fallback to Graphviz
+        # Optional Cytoscape (may not be installed); fallback to Graphviz or static list
         used_cyto = False
         try:
             from streamlit_cytoscapejs import cytoscape  # type: ignore
 
-            # Build elements
             elements = []
             for tname in dm["tables"].keys():
                 pos = positions.get(tname, None)
@@ -394,9 +361,9 @@ else:
                 {"selector": "edge", "style": {"curve-style": "bezier", "target-arrow-shape": "triangle", "line-color": "#4b8bbe", "target-arrow-color": "#4b8bbe", "width": 1}},
             ]
 
-            cy = cytoscape(
+            cytoscape(
                 elements=elements,
-                layout={"name": "preset"},  # honor provided positions
+                layout={"name": "preset"},
                 stylesheet=stylesheet,
                 height="700px",
                 user_panning_enabled=True,
@@ -404,27 +371,24 @@ else:
                 wheel_sensitivity=0.2,
                 key="design_cyto",
             )
-            # The component currently returns selection info only; positions are not returned.
-            # Positions persist visually during a session. We keep initial positions in session state.
             used_cyto = True
         except Exception:
             used_cyto = False
 
         if not used_cyto:
-            dot = build_graphviz_dot_from_model(dm, catalog, schema)
             try:
+                dot = build_graphviz_dot_from_model(dm, catalog, schema)
                 st.graphviz_chart(dot, use_container_width=True)
-            except Exception as exc:  # noqa: BLE001
-                st.warning(f"Graphviz rendering failed: {exc}")
+            except Exception:
+                st.write("Tables:")
+                st.dataframe(pd.DataFrame({"table": list(dm["tables"].keys())}))
 
         st.markdown("### Import from Unity Catalog")
         if st.button("Import UC into Design"):
             with st.spinner("Fetching metadata..."):
                 m = fetch_model_metadata(client, catalog, schema)
                 dm_import = metadata_to_model(m)
-                # Merge: UC import wins for existing tables
                 st.session_state.design_model = dm_import
-                # Initialize positions grid
                 st.session_state.design_positions = {t: {"x": 100 + 180 * (i % 4), "y": 100 + 160 * (i // 4)} for i, t in enumerate(dm_import["tables"].keys())}
                 st.success("Imported current UC model into Design mode.")
                 dm = st.session_state.design_model
