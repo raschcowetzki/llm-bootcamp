@@ -84,6 +84,33 @@ def fetch_model_metadata(client: DatabricksClient, catalog: str, schema: str) ->
     return {"tables": tables, "relationships": relationships}
 
 
+def metadata_to_model(metadata: Dict) -> Dict:
+    # Convert fetched metadata to a simplified client-side model structure
+    tables_model: Dict[str, Dict] = {}
+    for tname, t in metadata.get("tables", {}).items():
+        cols = []
+        for c in t.get("columns", []):
+            cols.append({
+                "name": c.get("name"),
+                "data_type": c.get("data_type", "STRING"),
+                "nullable": bool(c.get("is_nullable", True)),
+                "is_pk": bool(c.get("is_pk", False)),
+            })
+        tables_model[tname] = {
+            "columns": cols,
+        }
+    relationships_model = []
+    for child, parent, child_cols, parent_cols, fk_name in metadata.get("relationships", []):
+        relationships_model.append({
+            "name": fk_name,
+            "child_table": child,
+            "parent_table": parent,
+            "child_cols": child_cols,
+            "parent_cols": parent_cols,
+        })
+    return {"tables": tables_model, "relationships": relationships_model}
+
+
 def build_graphviz_dot(metadata: Dict, catalog: str, schema: str) -> str:
     tables = metadata.get("tables", {})
     relationships = metadata.get("relationships", [])
@@ -134,6 +161,37 @@ def build_graphviz_dot(metadata: Dict, catalog: str, schema: str) -> str:
     return "\n".join(lines)
 
 
+def build_graphviz_dot_from_model(model: Dict, catalog: str, schema: str) -> str:
+    # Reuse the same renderer but adapt the model shape
+    metadata_like = {
+        "tables": {
+            tname: {
+                "columns": [
+                    {
+                        "name": c.get("name"),
+                        "data_type": c.get("data_type", ""),
+                        "is_pk": bool(c.get("is_pk", False)),
+                        "is_fk": False,  # inferred during relationship loop below
+                    }
+                    for c in t.get("columns", [])
+                ]
+            }
+            for tname, t in model.get("tables", {}).items()
+        },
+        "relationships": [
+            (r.get("child_table"), r.get("parent_table"), r.get("child_cols", []), r.get("parent_cols", []), r.get("name", "fk"))
+            for r in model.get("relationships", [])
+        ],
+    }
+    # Mark FK columns
+    for child_table, _parent_table, child_cols, _parent_cols, _ in metadata_like["relationships"]:
+        if child_table in metadata_like["tables"]:
+            for c in metadata_like["tables"][child_table]["columns"]:
+                if c["name"] in set(child_cols):
+                    c["is_fk"] = True
+    return build_graphviz_dot(metadata_like, catalog, schema)
+
+
 def build_fk_sql(
     catalog: str,
     schema: str,
@@ -176,3 +234,30 @@ def build_create_table_sql(
     ine = "IF NOT EXISTS " if if_not_exists else ""
     full_name = quote_3part(catalog, schema, table_name)
     return f"CREATE TABLE {ine}{full_name} (\n  {',\n  '.join(cols_sql)}{pk_sql}\n)"
+
+
+def generate_sql_from_model(model: Dict, catalog: str, schema: str) -> List[str]:
+    stmts: List[str] = []
+    for tname, t in model.get("tables", {}).items():
+        cols = [
+            {"name": c.get("name"), "data_type": c.get("data_type", "STRING"), "nullable": bool(c.get("nullable", True))}
+            for c in t.get("columns", [])
+            if str(c.get("name", "")).strip() and str(c.get("data_type", "")).strip()
+        ]
+        pk_cols = [c.get("name") for c in t.get("columns", []) if bool(c.get("is_pk", False)) and str(c.get("name", "")).strip()]
+        if cols:
+            stmts.append(build_create_table_sql(catalog, schema, tname, cols, pk_cols))
+    for idx, r in enumerate(model.get("relationships", [])):
+        cname = r.get("name") or f"fk_{r.get('child_table')}_{r.get('parent_table')}_{idx+1}"
+        stmts.append(
+            build_fk_sql(
+                catalog,
+                schema,
+                str(r.get("child_table")),
+                str(r.get("parent_table")),
+                [str(c) for c in r.get("child_cols", [])],
+                [str(c) for c in r.get("parent_cols", [])],
+                cname,
+            )
+        )
+    return stmts
