@@ -4,3 +4,4 @@ databricks-sql-connector>=3.5.0
 pyvis>=0.3.2
 graphviz>=0.20.3
 python-dotenv>=1.0.1
+streamlit-cytoscapejs>=0.0.7
